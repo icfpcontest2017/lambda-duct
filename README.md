@@ -11,7 +11,7 @@ game server.
 The program can either be automatically installed via [OPAM](https://opam.ocaml.org)
 
 ```
-$ opam pin add lambda-duct https://github.com/icfpcontest17/lambda-duct.git
+$ opam pin add lambda-duct https://github.com/icfpcontest2017/lambda-duct.git
 ```
 
 or built from source using [OCamlbuild](https://github.com/ocaml/ocamlbuild)
