@@ -1,0 +1,26 @@
+opam-version: "1.2"
+name: "lambda-duct"
+version: "0.1"
+
+available: [
+  ocaml-version >= "4.04.0"
+  lwt-version >= "3.1.0"
+]
+
+build: [
+  [ make "native" ]
+]
+
+install: [
+  [ "cp" "lamduct" "%{lambda-duct:bin}%/lamduct" ]
+]
+
+remove: [
+  [ "rm" "-f" "%{lambda-duct:bin}%/lamduct"      ]
+]
+
+depends: [
+  "ocamlfind" {build}
+  "lwt"
+  "yojson"
+]
