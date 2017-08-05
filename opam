@@ -1,6 +1,6 @@
 opam-version: "1.2"
 name: "lambda-duct"
-version: "0.1"
+version: "0.2"
 
 available: [
   ocaml-version >= "4.04.0"
