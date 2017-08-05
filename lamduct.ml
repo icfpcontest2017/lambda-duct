@@ -414,8 +414,8 @@ end = struct
         begin
           let stdin_pipe = Lwt_unix.pipe () in
           let stdout_pipe = Lwt_unix.pipe () in
-          let icr = `FD_move (Lwt_unix.unix_file_descr (fst stdin_pipe)) in
-          let ocr = `FD_move (Lwt_unix.unix_file_descr (snd stdout_pipe)) in
+          let icr = `FD_copy (Lwt_unix.unix_file_descr (fst stdin_pipe)) in
+          let ocr = `FD_copy (Lwt_unix.unix_file_descr (snd stdout_pipe)) in
           let proc =
             Proc.spawn
               ~timeout
@@ -429,6 +429,12 @@ end = struct
               (Lwt_io.of_fd Lwt_io.Input (fst stdout_pipe))
               (Lwt_io.of_fd Lwt_io.Output (snd stdin_pipe))
           in
+          Lwt_unix.sleep 0.01
+          >>= fun () ->
+          Lwt_unix.close (snd stdout_pipe)
+          >>= fun () ->
+          Lwt_unix.close (fst stdin_pipe)
+          >>= fun () ->
           return (msg, { st with client = (update_client ~proc ~chan st.client) })
         end
       else Lwt.fail (ClientProgramNotFound st.client.cl_prog)
