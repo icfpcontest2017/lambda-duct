@@ -555,7 +555,7 @@ end = struct
            >>= fun () ->
            (invoke_client (msg, st))
            >>= simulate_offline_handshake
-           >>= send_message_to_client
+           >>= send_message_with_state_to_client
            >>= fun st ->
            catch
              (fun () ->
