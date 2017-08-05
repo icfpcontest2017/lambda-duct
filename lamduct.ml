@@ -682,7 +682,7 @@ let _ =
                 in
                 Printf.fprintf stderr "error: %s\n%!" msg
            | Mediator.ClientProgramNotFound prog ->
-              Printf.fprintf stderr "error: could note locate client program %s.\n%!" prog
+              Printf.fprintf stderr "error: could not locate client program %s.\n%!" prog
            | e ->
               Printf.fprintf stderr "fatal error: an unknown exception occurred.\n%!";
              Printexc.print_backtrace Pervasives.stderr; raise e);
