@@ -24,8 +24,8 @@ debug: version.ml
 	cp $(MAIN).native $(MAIN)
 
 version.ml:
-	@echo "let number = \"0.2\"" > version.ml
-	@echo "let name   = \"Thames\"" >> version.ml
+	@echo "let number = \"0.3\"" > version.ml
+	@echo "let name   = \"Isis\"" >> version.ml
 	@echo "let git    = \"$(shell git rev-parse --short HEAD)\"" >> version.ml
 
 .PHONY: all clean native profile debug

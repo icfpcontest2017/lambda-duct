@@ -16,17 +16,19 @@ module BoundedIO = struct
 
          https://github.com/mirage/ocaml-cohttp/issues/57
     *)
+    Lwt_log.debug_f "BIO send: %s." s >>= fun () ->
     Lwt_io.write oc (string_of_int @@ String.length s) >>= fun () ->
     Lwt_io.write_char oc ':' >>= fun () ->
     Lwt_io.flush oc >>= fun () ->
     Lwt_io.write oc s >>= fun () ->
     Lwt_io.flush oc
   let recv ic =
-    let size_buf = Buffer.create 9 in
+    let max_size = 9 in
+    let size_buf = Buffer.create max_size in
     let rec read_size count =
       (* don't allow more than 9 digits *)
-      if count > 9 then
-        fail (MessageTooBig 9)
+      if count > max_size then
+        fail (MessageTooBig max_size)
       else
         Lwt_io.read_char ic >>= function
         | c when '0' <= c && c <= '9' ->
@@ -37,12 +39,80 @@ module BoundedIO = struct
         | c ->
            (*prerr_endline @@ "Bad character: " ^ String.make 1 c;*)
            fail (BadCharacter c) in
+    Lwt_log.debug "BIO: receiving." >>= fun () ->
     read_size 0 >>= fun size ->
     let data_buf = Bytes.create size in
     Lwt_io.read_into_exactly ic data_buf 0 size >>= fun () ->
-    return (Bytes.to_string data_buf)
+    let msg = Bytes.to_string data_buf in
+    Lwt_log.debug_f "BIO recv: %s." msg
+    >>= fun () ->
+    return msg
 end
 
+(* File abstraction *)
+module File = struct
+  type t = string
+
+  let sep = '/'
+
+  let absolute_path filename =
+    let open Filename in
+    let filename =
+      if is_relative filename
+      then concat (Sys.getcwd ()) filename
+      else filename
+    in
+  (* Simplify . and .. components *)
+    let rec simplify filename =
+      let base = basename filename in
+      let dir = dirname filename in
+      if dir = filename then dir
+      else if base = current_dir_name then simplify dir
+      else if base = parent_dir_name then dirname (simplify dir)
+      else concat (simplify dir) base
+    in
+    simplify filename
+
+  let of_string : string -> t
+    = absolute_path
+
+  (* let rec intersperse : 'a -> 'a list -> 'a list *)
+  (*   = fun y -> *)
+  (*     function *)
+  (*     | [] -> [] *)
+  (*     | [x] -> [x] *)
+  (*     | x :: xs -> x :: y :: (intersperse y xs);; *)
+
+  (* let to_string : t -> string *)
+  (*   = fun f -> *)
+  (*     let sep = String.make 1 sep in *)
+  (*     List.fold_right *)
+  (*       (fun p acc -> p ^ acc) *)
+  (*       (intersperse sep f) "" *)
+
+  let to_string x = x
+
+  let exists : t -> bool
+    = fun f ->
+      Sys.file_exists (to_string f)
+
+  let basename = Filename.basename
+  let dirname  = Filename.dirname
+  (* let basename : t -> string *)
+  (*   = fun f -> *)
+  (*     match List.rev f with *)
+  (*     | [] -> "" *)
+  (*     | x :: _ -> x *)
+
+  (* let dirname : t -> string *)
+  (*   = fun f -> *)
+  (*     match List.rev f with *)
+  (*     | [] *)
+  (*     | [_] -> "." *)
+  (*     | _ :: ps -> to_string (List.rev ps) *)
+end
+
+(* Remote host resolver *)
 module Resolve = struct
   exception Unresolved of string
   type resolved_host = {
@@ -168,20 +238,17 @@ module Chan: sig
   val default : t
 
 end = struct
-  type cstate = Closed | Opened
-
   type t = { ic: Lwt_io.input_channel;
              oc: Lwt_io.output_channel;
              close: (unit -> unit Lwt.t);
-             state: cstate ref}
+           }
+
   type msg = LPMessage.t
 
   let make ic oc =
-    let state = ref Opened in
     { ic; oc;
-      close = (fun () -> Lwt.(Lwt_io.close ic
-                              >>= fun () -> Lwt_io.close oc));
-      state }
+      close = (fun () -> Lwt.(Lwt_io.close ic >>= fun () ->
+                              Lwt_io.close oc)); }
   let recv ch =
     let open Lwt in
     BoundedIO.recv ch.ic
@@ -192,9 +259,7 @@ end = struct
     BoundedIO.send ch.oc (LPMessage.to_string msg)
 
   let close ch =
-    match !(ch.state) with
-    | Closed -> Lwt.return_unit
-    | Opened -> ch.state := Closed; ch.close ()
+    ch.close ()
 
   let default = make Lwt_io.zero Lwt_io.null
 end
@@ -215,6 +280,7 @@ module Proc: sig
   val empty : t
   val status : t -> status
   val string_of_status : status -> string
+  val wait : t -> status Lwt.t
 end = struct
   type t = Empty
          | Proc of Lwt_process.process_none
@@ -280,6 +346,10 @@ end = struct
        match p#state with
        | Lwt_process.Running -> Running
        | Lwt_process.Exited st -> Exited st
+
+  let wait = function
+    | Empty  -> Lwt.return (Exited (Unix.WEXITED 0))
+    | Proc p -> Lwt.(p#status >>= fun st -> return (Exited st))
 end
 
 (* Mediates communication between offline mode punter and online mode
@@ -288,8 +358,9 @@ module Mediator: sig
   exception ConnectionFailure
   exception ClientProgramNotFound of string
   exception ClientInteractionError of exn * Proc.status
+  exception ServerInteractionError of exn
 
-  type program = string
+  type program = File.t
   val simulate : hostname:string -> port:int -> client_name:string -> timeout:float -> client_log:Unix.file_descr -> program -> unit Lwt.t
 end = struct
   exception ConnectionFailure
@@ -298,7 +369,7 @@ end = struct
 
   type client = {
     cl_name: string;
-    cl_prog: string;
+    cl_prog: File.t;
     cl_state: LPMessage.t;
     cl_proc: Proc.t;
     cl_ch: chan;
@@ -320,7 +391,7 @@ end = struct
   let send : chan -> LPMessage.t -> unit Lwt.t
     = fun ch msg -> Chan.send ch msg
 
-  type program = string
+  type program = File.t
 
   let make_client : ?proc:Proc.t ->
                     ?state:LPMessage.t ->
@@ -347,17 +418,24 @@ end = struct
       let name  = from_some cl.cl_name name in
       make_client ~proc ~state ~chan name cl.cl_prog
 
+
+  let timed : float -> 'a Lwt.t -> 'a Lwt.t
+    = fun d f -> Lwt.pick [Lwt_unix.timeout d; f]
+
   exception ClientProgramNotFound of string
   exception ClientInteractionError of exn * Proc.status
   let cl_interact : Proc.t -> (unit -> 'a Lwt.t) -> 'a Lwt.t
     = fun proc f ->
-      Lwt.catch f
-        (fun e -> Lwt.fail (ClientInteractionError (e, Proc.status proc)))
+      match Proc.status proc with
+      | Proc.Running ->
+         Lwt.catch (fun () -> timed 10.0 (f ()))
+           (fun e -> Lwt.fail (ClientInteractionError (e, Proc.status proc)))
+      | pstatus -> Lwt.fail (ClientInteractionError (Not_found, pstatus))
 
   exception ServerInteractionError of exn
   let srv_interact : (unit -> 'a Lwt.t) -> 'a Lwt.t
     = fun f ->
-      Lwt.catch f
+      Lwt.catch (fun () -> timed 10.0 (f ()))
         (fun e -> Lwt.fail (ServerInteractionError e))
 
   let simulate ~hostname ~port ~client_name ~timeout ~client_log program =
@@ -402,48 +480,50 @@ end = struct
       >>= fun () ->
       srv_interact (fun () -> recv st.server.srv_ch)
       >>= fun msg ->
-      Lwt_log.debug (Printf.sprintf "Game server: %s" (LPMessage.to_string msg))
+      Lwt_log.debug_f "Game server: %s" (LPMessage.to_string msg)
       >>= fun () ->
       return (msg, st)
     in
     (* invoke client program *)
     let invoke_client (msg, st) =
-      Lwt_log.info (Printf.sprintf "Invoking program %s..." st.client.cl_prog)
+      Lwt_log.info (Printf.sprintf "Invoking program %s..." (File.to_string st.client.cl_prog))
       >>= fun () ->
-      if Sys.file_exists st.client.cl_prog then
+      if File.exists st.client.cl_prog then
         begin
-          let stdin_pipe = Lwt_unix.pipe () in
-          let stdout_pipe = Lwt_unix.pipe () in
-          let icr = `FD_copy (Lwt_unix.unix_file_descr (fst stdin_pipe)) in
-          let ocr = `FD_copy (Lwt_unix.unix_file_descr (snd stdout_pipe)) in
+          let cwd = Unix.getcwd () in
+          let pdir = File.dirname st.client.cl_prog in
+          Lwt_log.debug_f "Changing working directory to: %s..." pdir
+          >>= fun () ->
+          Unix.chdir pdir;
+          let stdin_pipe = Lwt_unix.pipe_out () in
+          let stdout_pipe = Lwt_unix.pipe_in () in
+          let icr = fst stdin_pipe in
+          let ocr = snd stdout_pipe in
           let proc =
             Proc.spawn
               ~timeout
-              ~stdin:icr
-              ~stdout:ocr
+              ~stdin:(`FD_move icr)
+              ~stdout:(`FD_move ocr)
               ~stderr
-              st.client.cl_prog
+              (Printf.sprintf "./%s" (File.basename st.client.cl_prog))
           in
           let chan =
             Chan.make
-              (Lwt_io.of_fd Lwt_io.Input (fst stdout_pipe))
-              (Lwt_io.of_fd Lwt_io.Output (snd stdin_pipe))
+              (Lwt_io.of_fd ~mode:Lwt_io.Input (fst stdout_pipe))
+              (Lwt_io.of_fd ~mode:Lwt_io.Output (snd stdin_pipe))
           in
-          Lwt_unix.sleep 0.01
+          Lwt_log.debug_f "Changing working directory to: %s..." cwd
           >>= fun () ->
-          Lwt_unix.close (snd stdout_pipe)
-          >>= fun () ->
-          Lwt_unix.close (fst stdin_pipe)
-          >>= fun () ->
+          Unix.chdir cwd;
           return (msg, { st with client = (update_client ~proc ~chan st.client) })
         end
-      else Lwt.fail (ClientProgramNotFound st.client.cl_prog)
+      else Lwt.fail (ClientProgramNotFound (File.to_string st.client.cl_prog))
     in
     (* sends a message to the client *)
     let send_message_to_client (msg, st) =
       Lwt_log.debug "Forwarding message to client..."
       >>= fun () ->
-      Lwt_log.debug (Printf.sprintf "... message: %s." (LPMessage.to_string msg))
+      Lwt_log.debug_f "... message: %s." (LPMessage.to_string msg)
       >>= fun () ->
       cl_interact st.client.cl_proc (fun () -> send st.client.cl_ch msg)
       >>= fun () ->
@@ -463,7 +543,7 @@ end = struct
       cl_interact st.client.cl_proc (fun () -> recv st.client.cl_ch)
       (* recv st.client.cl_ch *)
       >>= fun msg ->
-      Lwt_log.debug (Printf.sprintf "Client: %s" (LPMessage.to_string msg))
+      Lwt_log.debug_f "Client: %s" (LPMessage.to_string msg)
       >>= fun () ->
       try
         let (state, move) = LPMessage.pop ~key:"state" msg in
@@ -498,11 +578,13 @@ end = struct
       let server_handshake (me, st) =
         Lwt_log.info "Handshaking with server..."
         >>= fun () ->
+        Lwt_log.debug_f "Sending %s to server" (LPMessage.to_string me)
+        >>= fun () ->
         srv_interact (fun () -> send st.server.srv_ch me)
         >>= fun () ->
         srv_interact (fun () -> recv st.server.srv_ch)
         >>= fun you ->
-        Lwt_log.debug (Printf.sprintf "Game server: %s" (LPMessage.to_string you))
+        Lwt_log.debug_f "Game server: %s" (LPMessage.to_string you)
         >>= fun () ->
         return (you, st)
       in
@@ -510,10 +592,16 @@ end = struct
       >>= fun () ->
       invoke_client (LPMessage.empty, st)
       >>= fun (_,st) ->
+      Lwt_log.debug "Interacting with client..."
+      >>= fun () ->
       cl_interact st.client.cl_proc (fun () -> recv st.client.cl_ch)
       >>= fun me ->
+      Lwt_log.debug_f "Me: %s." (LPMessage.to_string me)
+      >>= fun () ->
       server_handshake (me, st)
       >>= fun (you, st) ->
+      Lwt_log.debug_f "You: %s." (LPMessage.to_string you)
+      >>= fun () ->
       cl_interact st.client.cl_proc (fun () -> send st.client.cl_ch you)
       >>= fun () ->
       kill_client (LPMessage.empty, st)
@@ -529,7 +617,7 @@ end = struct
       Lwt_log.debug "Simulating handshake with game server..."
       >>= fun () ->
       let you = LPMessage.you_of_me me in
-      Lwt_log.debug (Printf.sprintf "... sending: %s." (LPMessage.to_string you))
+      Lwt_log.debug_f "... sending: %s." (LPMessage.to_string you)
       >>= fun () ->
       cl_interact st.client.cl_proc (fun () -> send st.client.cl_ch you)
       >>= fun () ->
@@ -559,9 +647,13 @@ end = struct
            >>= fun st ->
            catch
              (fun () ->
-               Lwt_unix.sleep 0.25
-               >>= fun () ->
-               kill_client (msg, st)
+               (* Lwt_unix.sleep 0.25 *)
+               (* >>= fun () -> *)
+             (* kill_client (msg, st) *)
+               Lwt_log.info "Waiting on client program to exit..." >>= fun () ->
+               Proc.wait st.client.cl_proc >>= fun pstatus ->
+               Lwt_log.info_f "Client %s." (Proc.string_of_status pstatus) >>= fun () ->
+               return (msg, st)
              )
              (fun _ -> return (msg, st))
            >>= (fun (_,st) -> return st)
@@ -652,7 +744,7 @@ let _ =
              ~client_name:!Settings.client_name
              ~timeout:!Settings.client_instance_timeout
              ~client_log:log_fd
-             prog)
+             (File.of_string prog))
          (fun exn ->
            (match exn with
            | BoundedIO.MessageTooBig max_size ->
@@ -683,10 +775,15 @@ let _ =
                 Printf.fprintf stderr "error: %s\n%!" msg
            | Mediator.ClientProgramNotFound prog ->
               Printf.fprintf stderr "error: could not locate client program %s.\n%!" prog
+           | Mediator.ServerInteractionError _ ->
+              Printf.fprintf stderr "error: server interaction error.\n%!"
            | e ->
               Printf.fprintf stderr "fatal error: an unknown exception occurred.\n%!";
              Printexc.print_backtrace Pervasives.stderr; raise e);
            Lwt.fail Exit);
        Unix.close log_fd
-     with Exit -> Unix.close log_fd; exit 1
+     with
+       Exit -> Unix.close log_fd; exit 1
+     | End_of_file ->
+        Printf.fprintf stderr "error: client or server connection was dropped.\n%!"; exit 1
 
