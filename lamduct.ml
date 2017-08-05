@@ -22,11 +22,11 @@ module BoundedIO = struct
     Lwt_io.write oc s >>= fun () ->
     Lwt_io.flush oc
   let recv ic =
-    let size_buf = Buffer.create 8 in
+    let size_buf = Buffer.create 9 in
     let rec read_size count =
-      (* don't allow more than 8 digits *)
-      if count > 8 then
-        fail (MessageTooBig 8)
+      (* don't allow more than 9 digits *)
+      if count > 9 then
+        fail (MessageTooBig 9)
       else
         Lwt_io.read_char ic >>= function
         | c when '0' <= c && c <= '9' ->
