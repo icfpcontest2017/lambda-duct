@@ -361,7 +361,7 @@ module Mediator: sig
   exception ServerInteractionError of exn
 
   type program = File.t
-  val simulate : hostname:string -> port:int -> client_name:string -> timeout:float -> client_log:Unix.file_descr -> program -> unit Lwt.t
+  val simulate : hostname:string -> port:int -> timeout:float -> response_timeout:float -> client_log:Unix.file_descr -> program -> unit Lwt.t
 end = struct
   exception ConnectionFailure
 
@@ -424,24 +424,28 @@ end = struct
 
   exception ClientProgramNotFound of string
   exception ClientInteractionError of exn * Proc.status
-  let cl_interact : Proc.t -> (unit -> 'a Lwt.t) -> 'a Lwt.t
-    = fun proc f ->
+  let cl_interact : float -> Proc.t -> (unit -> 'a Lwt.t) -> 'a Lwt.t
+    = fun d proc f ->
       match Proc.status proc with
       | Proc.Running ->
-         Lwt.catch (fun () -> timed 10.0 (f ()))
+         Lwt.catch (fun () ->
+           try
+             timed d (f ())
+           with Lwt_unix.Timeout -> raise Not_found
+         )
            (fun e -> Lwt.fail (ClientInteractionError (e, Proc.status proc)))
       | pstatus -> Lwt.fail (ClientInteractionError (Not_found, pstatus))
 
   exception ServerInteractionError of exn
   let srv_interact : (unit -> 'a Lwt.t) -> 'a Lwt.t
     = fun f ->
-      Lwt.catch (fun () -> timed 10.0 (f ()))
+      Lwt.catch f
         (fun e -> Lwt.fail (ServerInteractionError e))
 
-  let simulate ~hostname ~port ~client_name ~timeout ~client_log program =
+  let simulate ~hostname ~port ~timeout ~response_timeout ~client_log program =
     let open Lwt in
     let initial_state srv_fd srv_ch =
-      { client = make_client client_name program;
+      { client = make_client "No name" program;
         server = { srv_fd; srv_ch; }; }
     in
     let stderr = `FD_copy client_log in
@@ -525,7 +529,7 @@ end = struct
       >>= fun () ->
       Lwt_log.debug_f "... message: %s." (LPMessage.to_string msg)
       >>= fun () ->
-      cl_interact st.client.cl_proc (fun () -> send st.client.cl_ch msg)
+      cl_interact response_timeout st.client.cl_proc (fun () -> send st.client.cl_ch msg)
       >>= fun () ->
       Lwt_log.debug "Message has been forwarded."
       >>= fun () ->
@@ -540,7 +544,7 @@ end = struct
     let receive_state_from_client st =
       Lwt_log.info "Awaiting move from client program..."
       >>= fun () ->
-      cl_interact st.client.cl_proc (fun () -> recv st.client.cl_ch)
+      cl_interact response_timeout st.client.cl_proc (fun () -> recv st.client.cl_ch)
       (* recv st.client.cl_ch *)
       >>= fun msg ->
       Lwt_log.debug_f "Client: %s" (LPMessage.to_string msg)
@@ -594,7 +598,7 @@ end = struct
       >>= fun (_,st) ->
       Lwt_log.debug "Interacting with client..."
       >>= fun () ->
-      cl_interact st.client.cl_proc (fun () -> recv st.client.cl_ch)
+      cl_interact response_timeout st.client.cl_proc (fun () -> recv st.client.cl_ch)
       >>= fun me ->
       Lwt_log.debug_f "Me: %s." (LPMessage.to_string me)
       >>= fun () ->
@@ -602,7 +606,7 @@ end = struct
       >>= fun (you, st) ->
       Lwt_log.debug_f "You: %s." (LPMessage.to_string you)
       >>= fun () ->
-      cl_interact st.client.cl_proc (fun () -> send st.client.cl_ch you)
+      cl_interact response_timeout st.client.cl_proc (fun () -> send st.client.cl_ch you)
       >>= fun () ->
       kill_client (LPMessage.empty, st)
       >>= fun (_,st) ->
@@ -612,14 +616,14 @@ end = struct
     let simulate_offline_handshake (msg, st) =
       Lwt_log.info "Handshaking with client..."
       >>= fun () ->
-      cl_interact st.client.cl_proc (fun () -> recv st.client.cl_ch)
+      cl_interact response_timeout st.client.cl_proc (fun () -> recv st.client.cl_ch)
       >>= fun me ->
       Lwt_log.debug "Simulating handshake with game server..."
       >>= fun () ->
       let you = LPMessage.you_of_me me in
       Lwt_log.debug_f "... sending: %s." (LPMessage.to_string you)
       >>= fun () ->
-      cl_interact st.client.cl_proc (fun () -> send st.client.cl_ch you)
+      cl_interact response_timeout st.client.cl_proc (fun () -> send st.client.cl_ch you)
       >>= fun () ->
       return (msg, st)
     in
@@ -673,8 +677,8 @@ module Settings = struct
   let game_port     = ref 9999
 
   let client_program : string option ref = ref None
-  let client_name    : string ref = ref "Mysterious Punter"
   let client_instance_timeout : float ref = ref 10.0
+  let client_response_timeout : float ref = ref 10.0
   let client_instance_log : string ref = ref "/dev/null"
 end
 
@@ -707,13 +711,14 @@ let _ =
     ignore(if level > 1 then Lwt_log.add_rule "*" Lwt_log.Info);
     ignore(if level > 2 then Lwt_log.add_rule "*" Lwt_log.Debug)
   in
-  let set_timeout f =
-    if f > 0.0 then Settings.client_instance_timeout := f
+  let set_timeout setting f =
+    if f > 0.0 then setting := f
     else raise (Bad "error: client instance timeout must be positive")
   in
   let arg_specs = align [
     ("--client-instance-logfile", Set_string Settings.client_instance_log,    " Logging client instance stderr               (default: /dev/null)");
-    ("--client-instance-timeout", Float (fun f -> set_timeout f),             " Maximum lifetime per client program instance (default: " ^ (Printf.sprintf "%.0f seconds)" !Settings.client_instance_timeout));
+    ("--client-instance-timeout", Float (fun f -> set_timeout Settings.client_instance_timeout f),             " Maximum lifetime per client program instance (default: " ^ (Printf.sprintf "%.0f seconds)" !Settings.client_instance_timeout));
+    ("--client-response-timeout", Float (fun f -> set_timeout Settings.client_response_timeout f),             " Maximum time for client program to respond   (default: " ^ (Printf.sprintf "%.0f seconds)" !Settings.client_response_timeout));
     ("--game-hostname",           Set_string Settings.game_hostname,          " Hostname of the game server                  (default: " ^ !Settings.game_hostname ^ ")" );
     ("--game-port",               Int (fun n -> set_port n),                  " Port to connect to on the game server        (default: " ^ (string_of_int !Settings.game_port) ^ ")");
     ("--log-level",               Int (fun n -> set_logging n),               " Logging level for lamduct (values: 0 to 3)   (default: 0)");
@@ -741,8 +746,8 @@ let _ =
            Mediator.simulate
              ~hostname:!Settings.game_hostname
              ~port:!Settings.game_port
-             ~client_name:!Settings.client_name
              ~timeout:!Settings.client_instance_timeout
+             ~response_timeout:!Settings.client_response_timeout
              ~client_log:log_fd
              (File.of_string prog))
          (fun exn ->
@@ -786,4 +791,6 @@ let _ =
        Exit -> Unix.close log_fd; exit 1
      | End_of_file ->
         Printf.fprintf stderr "error: client or server connection was dropped.\n%!"; exit 1
+     | Lwt_unix.Timeout ->
+        Printf.fprintf stderr "error: client timed out.\n%!"; exit 1
 
