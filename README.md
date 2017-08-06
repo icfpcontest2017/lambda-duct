@@ -23,6 +23,14 @@ $ make
 Either approach produces a binary `lamduct`. If built from source this
 binary must be manually installed into a suitable directory.
 
+#### Troubleshooting
+
+If you have trouble installing by simply using the instructions above, fear not. Try the following after installing `opam`.
+
+     opam switch 4.04.2
+     eval `opman_config en`
+     opam pin add lambda-duct https://github.com/icfpcontest2017/lambda-duct.git
+
 ### Running
 
 The Lambda Duct binary takes as input the name of client program, i.e.
