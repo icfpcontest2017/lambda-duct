@@ -25,11 +25,13 @@ binary must be manually installed into a suitable directory.
 
 #### Troubleshooting
 
-If you have trouble installing by simply using the instructions above, fear not. Try the following after installing `opam`.
+If you have trouble installing via OPAM it might be that your environment is out of sync. Try the following after installing `opam`.
 
-     opam switch 4.04.2
-     eval `opman_config en`
-     opam pin add lambda-duct https://github.com/icfpcontest2017/lambda-duct.git
+```
+opam switch 4.04.2
+eval `opam config env`
+oam pin add lambda-duct https://github.com/icfpcontest2017/lambda-duct.git
+```
 
 ### Running
 
