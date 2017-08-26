@@ -30,7 +30,7 @@ If you have trouble installing via OPAM it might be that your environment is out
 ```
 opam switch 4.04.2
 eval `opam config env`
-oam pin add lambda-duct https://github.com/icfpcontest2017/lambda-duct.git
+opam pin add lambda-duct https://github.com/icfpcontest2017/lambda-duct.git
 ```
 
 ### Running
